@@ -3,16 +3,76 @@ import { useState, useCallback, useEffect, useRef } from "react";
 /*
  * =============================================
  *  Spotify Playlist Creator — Mobile-First
- * =============================================
- *  Deploy: Replace SPOTIFY_CLIENT_ID with yours
- *  from https://developer.spotify.com/dashboard
+ *  Auth: Authorization Code Flow with PKCE
+ *  (No backend needed)
  * =============================================
  */
 
 const SPOTIFY_CLIENT_ID = "0bd908bfd00242e880c81e6dcb34cabc";
 const REDIRECT_URI = window.location.origin + window.location.pathname;
 const SCOPES = "playlist-modify-public playlist-modify-private";
-const AUTH_URL = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=token&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${encodeURIComponent(SCOPES)}`;
+
+// ── PKCE Auth Helpers ──
+
+function generateRandomString(length) {
+  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const values = crypto.getRandomValues(new Uint8Array(length));
+  return values.reduce((acc, x) => acc + possible[x % possible.length], "");
+}
+
+async function sha256(plain) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(plain);
+  return window.crypto.subtle.digest("SHA-256", data);
+}
+
+function base64urlEncode(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = "";
+  bytes.forEach((b) => (str += String.fromCharCode(b)));
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function startAuth() {
+  const codeVerifier = generateRandomString(64);
+  const hashed = await sha256(codeVerifier);
+  const codeChallenge = base64urlEncode(hashed);
+
+  sessionStorage.setItem("code_verifier", codeVerifier);
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: SPOTIFY_CLIENT_ID,
+    scope: SCOPES,
+    code_challenge_method: "S256",
+    code_challenge: codeChallenge,
+    redirect_uri: REDIRECT_URI,
+  });
+
+  window.location.href = `https://accounts.spotify.com/authorize?${params.toString()}`;
+}
+
+async function exchangeCodeForToken(code) {
+  const codeVerifier = sessionStorage.getItem("code_verifier");
+  if (!codeVerifier) throw new Error("No code verifier found");
+
+  const res = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: SPOTIFY_CLIENT_ID,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: codeVerifier,
+    }),
+  });
+
+  if (!res.ok) throw new Error("Token exchange failed");
+  const data = await res.json();
+  sessionStorage.removeItem("code_verifier");
+  return data.access_token;
+}
 
 // ── Helpers ──
 
@@ -38,12 +98,6 @@ function parsePlaylistText(text) {
     if (songTitle) songs.push({ title: songTitle, artist });
   }
   return songs.length > 0 ? { title, songs } : null;
-}
-
-function getTokenFromHash() {
-  const hash = window.location.hash.substring(1);
-  const params = new URLSearchParams(hash);
-  return params.get("access_token");
 }
 
 // ── Spotify API ──
@@ -148,6 +202,84 @@ const SAMPLE_TEXT = `Sharp-Edged Tenderness
 9. Naima / John Coltrane
 10. Merry Christmas Mr. Lawrence / Ryuichi Sakamoto`;
 
+// ── Prompt Section ──
+
+const AI_PROMPT = `あなたは音楽キュレーターです。入力テキスト（会話ログ/自己紹介）から読み取れる「人間性」だけを根拠に、その人を表すプレイリストのタイトルを最初に1つ付け、その後に10曲を選んでください。曲やアーティスト名が入力に含まれていても、それ自体は根拠として使わないでください。
+条件：
+0) 出力はコピペできる"プレーンテキスト"のみ（コードブロック推奨）。余計な装飾・説明は一切なし
+1) 1行目はプレイリストタイトルのみ
+2) 2行目以降は10行のみ（1〜10の番号付き）
+3) 各行は「曲名 / アーティスト名」
+4) 実在が確実な曲だけ。確信がない場合は別の曲に差し替える（架空の曲名を作らない）
+5) ジャンル偏りは避ける（同系統は最大4曲まで）
+6) 有名曲だけで埋めない（半分は玄人寄りでもOK）`;
+
+function PromptSection() {
+  const [promptCopied, setPromptCopied] = useState(false);
+
+  const handleCopyPrompt = () => {
+    navigator.clipboard?.writeText(AI_PROMPT);
+    setPromptCopied(true);
+    setTimeout(() => setPromptCopied(false), 2000);
+  };
+
+  return (
+    <div style={{
+      marginTop: 48, padding: 20,
+      background: "rgba(255,255,255,0.02)",
+      border: "1px solid rgba(255,255,255,0.06)",
+      borderRadius: 16, animation: "fadeIn 0.5s ease-out",
+    }}>
+      <div style={{
+        fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.6)",
+        marginBottom: 6,
+      }}>
+        リストがない？
+      </div>
+      <div style={{
+        fontSize: 13, color: "rgba(255,255,255,0.35)", lineHeight: 1.7,
+        marginBottom: 14,
+      }}>
+        このプロンプトを使ってるAIに入力してみて！<br />
+        自己紹介やチャット履歴を一緒に貼ると、あなただけのプレイリストが生成されます。
+      </div>
+
+      <div style={{
+        background: "rgba(0,0,0,0.3)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 10, padding: 14,
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: 11, lineHeight: 1.8,
+        color: "rgba(255,255,255,0.45)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        maxHeight: 200,
+        overflowY: "auto",
+        WebkitOverflowScrolling: "touch",
+      }}>
+        {AI_PROMPT}
+      </div>
+
+      <button
+        className="btn btn-ghost"
+        onClick={handleCopyPrompt}
+        style={{
+          width: "100%", marginTop: 12,
+          fontSize: 14,
+          color: promptCopied ? "#1DB954" : "rgba(255,255,255,0.5)",
+          borderColor: promptCopied ? "rgba(29,185,84,0.3)" : "rgba(255,255,255,0.08)",
+          transition: "all 0.2s ease",
+        }}
+      >
+        {promptCopied
+          ? <><CheckIcon size={14} /> コピーしました</>
+          : <><CopyIcon /> プロンプトをコピー</>
+        }
+      </button>
+    </div>
+  );
+}
+
 // ── Main App ──
 
 export default function App() {
@@ -161,6 +293,7 @@ export default function App() {
 
   const [token, setToken] = useState(null);
   const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(false);
 
   const [progress, setProgress] = useState(0);
   const [currentTrack, setCurrentTrack] = useState("");
@@ -168,17 +301,26 @@ export default function App() {
   const [createdPlaylistUrl, setCreatedPlaylistUrl] = useState("");
   const [error, setError] = useState("");
 
-  // Swipe-to-delete state
-  const [swipingIndex, setSwipingIndex] = useState(null);
-  const touchStartX = useRef(0);
-  const touchCurrentX = useRef(0);
-
+  // Handle PKCE callback: check for ?code= in URL
   useEffect(() => {
-    const t = getTokenFromHash();
-    if (t) {
-      setToken(t);
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (code) {
+      setAuthLoading(true);
       window.history.replaceState(null, "", window.location.pathname);
-      spotifyGet("/me", t).then(setUser).catch(() => setToken(null));
+      exchangeCodeForToken(code)
+        .then((accessToken) => {
+          setToken(accessToken);
+          return spotifyGet("/me", accessToken);
+        })
+        .then((userData) => {
+          setUser(userData);
+          setAuthLoading(false);
+        })
+        .catch(() => {
+          setToken(null);
+          setAuthLoading(false);
+        });
     }
   }, []);
 
@@ -214,27 +356,12 @@ export default function App() {
     setCurrentTrack(""); setResults([]); setCreatedPlaylistUrl(""); setError("");
     setCopied(false);
   };
-  const handleLogin = () => { window.location.href = AUTH_URL; };
+  const handleLogin = () => startAuth();
   const handleLogout = () => { setToken(null); setUser(null); };
   const handleCopyList = () => {
     const text = `${playlistTitle}\n${songs.map((s, i) => `${i + 1}. ${s.title} / ${s.artist}`).join("\n")}`;
     navigator.clipboard?.writeText(text);
     setCopied(true); setTimeout(() => setCopied(false), 2000);
-  };
-
-  // Touch handlers for swipe-to-delete
-  const handleTouchStart = (i, e) => {
-    touchStartX.current = e.touches[0].clientX;
-    touchCurrentX.current = e.touches[0].clientX;
-    setSwipingIndex(i);
-  };
-  const handleTouchMove = (e) => {
-    touchCurrentX.current = e.touches[0].clientX;
-  };
-  const handleTouchEnd = (i) => {
-    const diff = touchStartX.current - touchCurrentX.current;
-    if (diff > 80) removeSong(i);
-    setSwipingIndex(null);
   };
 
   const handleCreate = async () => {
@@ -261,7 +388,7 @@ export default function App() {
       }
       const playlist = await spotifyPost(`/users/${user.id}/playlists`, token, {
         name: playlistTitle || "My Playlist",
-        description: `Created with Playlist Creator`,
+        description: "Created with Playlist Creator",
         public: false,
       });
       setCurrentTrack("曲を追加中..."); setProgress(95);
@@ -301,7 +428,7 @@ export default function App() {
   return (
     <div style={{
       minHeight: "100vh",
-      minHeight: "100dvh", /* dynamic viewport height for mobile browsers */
+      minHeight: "100dvh",
       background: "#0a0a0a", color: "#eee",
       fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif",
       WebkitTextSizeAdjust: "100%",
@@ -309,16 +436,9 @@ export default function App() {
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap');
-
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         html { -webkit-text-size-adjust: 100%; }
-        body {
-          background: #0a0a0a;
-          overflow-x: hidden;
-          -webkit-overflow-scrolling: touch;
-        }
-
-        /* Prevent iOS zoom on input focus */
+        body { background: #0a0a0a; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
         input, textarea, select { font-size: 16px !important; }
 
         @keyframes fadeIn {
@@ -347,8 +467,8 @@ export default function App() {
           100% { background-position: 0% 50%; }
         }
         @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* ── Paste area ── */
         .paste-area {
           width: 100%; min-height: 220px;
           background: rgba(255,255,255,0.03);
@@ -358,56 +478,38 @@ export default function App() {
           font-size: 16px !important; line-height: 1.75;
           resize: none; outline: none;
           transition: all 0.3s ease;
-          -webkit-appearance: none;
-          appearance: none;
+          -webkit-appearance: none; appearance: none;
         }
-        .paste-area:focus {
-          border-color: rgba(29,185,84,0.4);
-          background: rgba(29,185,84,0.02);
-        }
+        .paste-area:focus { border-color: rgba(29,185,84,0.4); background: rgba(29,185,84,0.02); }
         .paste-area.success {
           border-style: solid; border-color: rgba(29,185,84,0.5);
-          background: rgba(29,185,84,0.03);
-          animation: successBorder 2s ease infinite;
+          background: rgba(29,185,84,0.03); animation: successBorder 2s ease infinite;
         }
         .paste-area::placeholder {
-          color: rgba(255,255,255,0.2);
-          font-family: 'DM Sans', sans-serif;
-          font-size: 16px !important;
-          line-height: 2;
+          color: rgba(255,255,255,0.2); font-family: 'DM Sans', sans-serif;
+          font-size: 16px !important; line-height: 2;
         }
 
-        /* ── Track rows ── */
         .track-row {
           animation: slideRow 0.3s ease-out both;
           display: flex; align-items: center; gap: 10px;
           padding: 12px; border-radius: 12px;
           transition: background 0.15s;
-          -webkit-user-select: none;
-          user-select: none;
-          position: relative;
-          overflow: hidden;
+          -webkit-user-select: none; user-select: none;
         }
-        @media (hover: hover) {
-          .track-row:hover { background: rgba(255,255,255,0.03); }
-        }
+        @media (hover: hover) { .track-row:hover { background: rgba(255,255,255,0.03); } }
         .track-row:active { background: rgba(255,255,255,0.04); }
 
-        /* ── Edit inputs ── */
         .edit-input {
           background: rgba(255,255,255,0.06);
           border: 1px solid rgba(255,255,255,0.15);
           border-radius: 8px; padding: 10px 12px; color: #eee;
-          font-size: 16px !important;
-          font-family: 'DM Sans', sans-serif;
-          outline: none; width: 100%;
-          transition: border-color 0.2s;
-          -webkit-appearance: none;
-          appearance: none;
+          font-size: 16px !important; font-family: 'DM Sans', sans-serif;
+          outline: none; width: 100%; transition: border-color 0.2s;
+          -webkit-appearance: none; appearance: none;
         }
         .edit-input:focus { border-color: #1DB954; }
 
-        /* ── Buttons — all min 48px tap target ── */
         .btn {
           border: none; border-radius: 100px;
           padding: 16px 28px; font-size: 16px; font-weight: 600;
@@ -415,44 +517,32 @@ export default function App() {
           cursor: pointer; transition: all 0.2s ease;
           display: inline-flex; align-items: center; justify-content: center; gap: 8px;
           min-height: 48px;
-          -webkit-tap-highlight-color: transparent;
-          touch-action: manipulation;
+          -webkit-tap-highlight-color: transparent; touch-action: manipulation;
         }
         .btn:active { transform: scale(0.97); }
 
         .btn-spotify { background: #1DB954; color: #000; }
-        .btn-spotify:hover { background: #1ed760; }
         @media (hover: hover) {
-          .btn-spotify:hover {
-            box-shadow: 0 6px 24px rgba(29,185,84,0.3);
-            transform: translateY(-1px);
-          }
+          .btn-spotify:hover { background: #1ed760; box-shadow: 0 6px 24px rgba(29,185,84,0.3); transform: translateY(-1px); }
         }
-        .btn-spotify:disabled {
-          opacity: 0.35; cursor: not-allowed; transform: none; box-shadow: none;
-        }
+        .btn-spotify:disabled { opacity: 0.35; cursor: not-allowed; transform: none; box-shadow: none; }
 
         .btn-ghost {
           background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.6);
           border: 1px solid rgba(255,255,255,0.08); border-radius: 100px;
         }
         .btn-ghost:active { background: rgba(255,255,255,0.12); }
-        @media (hover: hover) {
-          .btn-ghost:hover { background: rgba(255,255,255,0.1); color: #eee; }
-        }
+        @media (hover: hover) { .btn-ghost:hover { background: rgba(255,255,255,0.1); color: #eee; } }
 
         .btn-sm { padding: 10px 16px; font-size: 13px; min-height: 40px; }
 
-        /* ── Icon buttons — 44px min ── */
         .icon-btn {
           background: none; border: none;
           min-width: 44px; min-height: 44px;
           display: flex; align-items: center; justify-content: center;
           border-radius: 10px; cursor: pointer;
-          color: rgba(255,255,255,0.3);
-          transition: all 0.15s;
-          -webkit-tap-highlight-color: transparent;
-          touch-action: manipulation;
+          color: rgba(255,255,255,0.3); transition: all 0.15s;
+          -webkit-tap-highlight-color: transparent; touch-action: manipulation;
         }
         .icon-btn:active { background: rgba(255,255,255,0.1); }
         @media (hover: hover) {
@@ -460,27 +550,20 @@ export default function App() {
           .icon-btn.danger:hover { color: #e74c3c; }
         }
 
-        /* ── Progress bar ── */
-        .progress-bg {
-          height: 5px; background: rgba(255,255,255,0.08);
-          border-radius: 3px; overflow: hidden;
-        }
+        .progress-bg { height: 5px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
         .progress-fill {
           height: 100%; border-radius: 3px;
           background: linear-gradient(90deg, #1DB954, #1ed760, #1DB954);
-          background-size: 200% 100%;
-          animation: gradientShift 2s ease infinite;
+          background-size: 200% 100%; animation: gradientShift 2s ease infinite;
           transition: width 0.4s ease;
         }
 
-        /* ── Result rows ── */
         .result-row {
           display: flex; align-items: center; gap: 10px;
           padding: 10px 12px; border-radius: 10px;
           animation: slideRow 0.3s ease-out both;
         }
 
-        /* ── Done song links ── */
         .done-song-link {
           display: flex; align-items: center; gap: 12px;
           padding: 12px; border-radius: 12px;
@@ -490,30 +573,20 @@ export default function App() {
           -webkit-tap-highlight-color: transparent;
         }
         .done-song-link:active { background: rgba(29,185,84,0.08); }
-        @media (hover: hover) {
-          .done-song-link:hover { background: rgba(29,185,84,0.06); }
+        @media (hover: hover) { .done-song-link:hover { background: rgba(29,185,84,0.06); } }
+
+        .spinner {
+          width: 18px; height: 18px;
+          border: 2.5px solid rgba(255,255,255,0.2);
+          border-top-color: #1DB954;
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
         }
 
-        /* ── Swipe hint (mobile) ── */
-        .swipe-hint {
-          display: none;
-          font-size: 11px; color: rgba(255,255,255,0.2);
-          text-align: center; margin-top: 6px;
-        }
-        @media (hover: none) and (pointer: coarse) {
-          .swipe-hint { display: block; }
-        }
-
-        /* ── Hide desktop-only elements on mobile ── */
-        @media (max-width: 480px) {
-          .desktop-only { display: none !important; }
-        }
-        @media (min-width: 481px) {
-          .mobile-only { display: none !important; }
-        }
+        @media (max-width: 480px) { .desktop-only { display: none !important; } }
+        @media (min-width: 481px) { .mobile-only { display: none !important; } }
       `}</style>
 
-      {/* Background glow */}
       <div style={{
         position: "fixed", top: 0, left: 0, right: 0, height: 400,
         background: "radial-gradient(ellipse 70% 50% at 50% -8%, rgba(29,185,84,0.06) 0%, transparent 70%)",
@@ -521,19 +594,15 @@ export default function App() {
       }} />
 
       <div style={{
-        maxWidth: 520,
-        margin: "0 auto",
+        maxWidth: 520, margin: "0 auto",
         padding: "max(env(safe-area-inset-top, 16px), 16px) 16px max(env(safe-area-inset-bottom, 24px), 24px)",
-        paddingTop: 28,
-        position: "relative",
-        width: "100%",
+        paddingTop: 28, position: "relative", width: "100%",
       }}>
 
         {/* ── Top bar ── */}
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
-          marginBottom: 28, animation: "fadeIn 0.4s ease-out",
-          gap: 8,
+          marginBottom: 28, animation: "fadeIn 0.4s ease-out", gap: 8,
         }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 7,
@@ -546,7 +615,12 @@ export default function App() {
             </span>
           </div>
 
-          {token && user ? (
+          {authLoading ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="spinner" />
+              <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>認証中...</span>
+            </div>
+          ) : token && user ? (
             <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
               <span style={{
                 fontSize: 12, color: "rgba(255,255,255,0.4)",
@@ -554,8 +628,7 @@ export default function App() {
               }}>
                 {user.display_name}
               </span>
-              <button className="btn btn-ghost btn-sm" onClick={handleLogout}
-                style={{ padding: "8px 12px", flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" onClick={handleLogout} style={{ padding: "8px 12px", flexShrink: 0 }}>
                 ログアウト
               </button>
             </div>
@@ -567,14 +640,8 @@ export default function App() {
         </div>
 
         {/* ── Header ── */}
-        <div style={{
-          textAlign: "center", marginBottom: 28, animation: "fadeIn 0.5s ease-out",
-          padding: "0 4px",
-        }}>
-          <h1 style={{
-            fontSize: "clamp(24px, 7vw, 30px)", fontWeight: 700,
-            letterSpacing: "-0.03em", lineHeight: 1.3, marginBottom: 8,
-          }}>
+        <div style={{ textAlign: "center", marginBottom: 28, animation: "fadeIn 0.5s ease-out", padding: "0 4px" }}>
+          <h1 style={{ fontSize: "clamp(24px, 7vw, 30px)", fontWeight: 700, letterSpacing: "-0.03em", lineHeight: 1.3, marginBottom: 8 }}>
             {phase === "paste" && "リストを貼るだけ。"}
             {phase === "preview" && playlistTitle}
             {phase === "creating" && "作成中..."}
@@ -599,7 +666,6 @@ export default function App() {
               value={rawText}
               onChange={(e) => setRawText(e.target.value)}
             />
-
             {pasteSuccess && (
               <div style={{
                 display: "flex", alignItems: "center", gap: 8,
@@ -609,26 +675,21 @@ export default function App() {
                 <CheckIcon size={16} /> 認識完了 — 次へ進みます...
               </div>
             )}
-
             <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button className="btn btn-ghost btn-sm" onClick={() => setRawText(SAMPLE_TEXT)}>
                 <PasteIcon size={13} /> サンプルで試す
               </button>
               {rawText.trim() && !pasteSuccess && (
-                <button className="btn btn-ghost btn-sm" onClick={handleParse}>
-                  手動で読み込む →
-                </button>
+                <button className="btn btn-ghost btn-sm" onClick={handleParse}>手動で読み込む →</button>
               )}
             </div>
-
             <div style={{
               marginTop: 24, padding: 14,
               background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)",
               borderRadius: 12, fontSize: 13, color: "rgba(255,255,255,0.3)", lineHeight: 1.9,
             }}>
               <div style={{ fontWeight: 600, color: "rgba(255,255,255,0.45)", marginBottom: 4 }}>フォーマット</div>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "rgba(255,255,255,0.4)", fontSize: 12 }}>1行目</span> → プレイリスト名
-              <br />
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "rgba(255,255,255,0.4)", fontSize: 12 }}>1行目</span> → プレイリスト名<br />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "rgba(255,255,255,0.4)", fontSize: 12 }}>2行目〜</span> →{" "}
               <code style={{ background: "rgba(29,185,84,0.12)", color: "#1DB954", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
                 番号. 曲名 / アーティスト
@@ -645,40 +706,25 @@ export default function App() {
                 padding: 14, marginBottom: 16, borderRadius: 12,
                 background: "rgba(231,76,60,0.1)", border: "1px solid rgba(231,76,60,0.2)",
                 color: "#e74c3c", fontSize: 14,
-              }}>
-                {error}
-              </div>
+              }}>{error}</div>
             )}
-
             <div style={{
               background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
               borderRadius: 16, overflow: "hidden",
             }}>
               <div style={{ height: 4, background: "linear-gradient(90deg, #1DB954, #1ed760, #15a047)" }} />
-
               <div style={{ padding: "4px" }}>
                 {songs.map((song, i) => (
-                  <div
-                    key={i}
-                    className="track-row"
-                    style={{ animationDelay: `${i * 0.03}s` }}
-                    onTouchStart={(e) => editingIndex !== i && handleTouchStart(i, e)}
-                    onTouchMove={handleTouchMove}
-                    onTouchEnd={() => editingIndex !== i && handleTouchEnd(i)}
-                  >
+                  <div key={i} className="track-row" style={{ animationDelay: `${i * 0.03}s` }}>
                     <span style={{
                       fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                      color: "rgba(255,255,255,0.2)", width: 20, textAlign: "right",
-                      flexShrink: 0,
-                    }}>
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
+                      color: "rgba(255,255,255,0.2)", width: 20, textAlign: "right", flexShrink: 0,
+                    }}>{String(i + 1).padStart(2, "0")}</span>
 
                     {editingIndex === i ? (
                       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
                         <input className="edit-input" value={song.title} placeholder="曲名"
-                          onChange={(e) => handleSongEdit(i, "title", e.target.value)}
-                          autoFocus />
+                          onChange={(e) => handleSongEdit(i, "title", e.target.value)} autoFocus />
                         <input className="edit-input" value={song.artist} placeholder="アーティスト"
                           onChange={(e) => handleSongEdit(i, "artist", e.target.value)} />
                         <button className="btn btn-ghost btn-sm" style={{ alignSelf: "flex-end" }}
@@ -688,28 +734,16 @@ export default function App() {
                       </div>
                     ) : (
                       <>
-                        <div style={{ flex: 1, minWidth: 0 }}
-                          onClick={() => setEditingIndex(i)}>
-                          <div style={{
-                            fontSize: 15, fontWeight: 500,
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          }}>
+                        <div style={{ flex: 1, minWidth: 0 }} onClick={() => setEditingIndex(i)}>
+                          <div style={{ fontSize: 15, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {song.title}
                           </div>
-                          <div style={{
-                            fontSize: 13, color: "rgba(255,255,255,0.35)",
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          }}>
+                          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {song.artist}
                           </div>
                         </div>
-
-                        <button className="icon-btn desktop-only" onClick={() => setEditingIndex(i)}>
-                          <EditIcon />
-                        </button>
-                        <button className="icon-btn danger" onClick={() => removeSong(i)}>
-                          <XIcon />
-                        </button>
+                        <button className="icon-btn desktop-only" onClick={() => setEditingIndex(i)}><EditIcon /></button>
+                        <button className="icon-btn danger" onClick={() => removeSong(i)}><XIcon /></button>
                       </>
                     )}
                   </div>
@@ -717,39 +751,25 @@ export default function App() {
               </div>
             </div>
 
-            <div className="swipe-hint">タップで編集 • ✕ で削除</div>
-
-            {/* Auth prompt */}
             {!token && (
               <div style={{
                 marginTop: 16, padding: 14,
                 background: "rgba(29,185,84,0.05)", border: "1px solid rgba(29,185,84,0.12)",
                 borderRadius: 14,
               }}>
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 10, marginBottom: 10,
-                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                   <SpotifyLogo size={20} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.7)" }}>
-                      ログインで自動作成
-                    </div>
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>
-                      なしでもデモで動作確認OK
-                    </div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.7)" }}>ログインで自動作成</div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>なしでもデモで動作確認OK</div>
                   </div>
                 </div>
-                <button className="btn btn-spotify" style={{ width: "100%" }} onClick={handleLogin}>
-                  Spotifyにログイン
-                </button>
+                <button className="btn btn-spotify" style={{ width: "100%" }} onClick={handleLogin}>Spotifyにログイン</button>
               </div>
             )}
 
-            {/* Actions */}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={handleReset}>
-                やり直す
-              </button>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={handleReset}>やり直す</button>
               <button className="btn btn-spotify" style={{ flex: 2 }}
                 onClick={token ? handleCreate : handleDemoCreate}
                 disabled={songs.length === 0}>
@@ -769,16 +789,12 @@ export default function App() {
               </div>
               <div style={{
                 marginTop: 14, fontSize: 14, color: "rgba(255,255,255,0.45)",
-                display: "flex", alignItems: "center", gap: 6,
-                overflow: "hidden",
+                display: "flex", alignItems: "center", gap: 6, overflow: "hidden",
               }}>
                 <span style={{ animation: "pulse 1.2s ease infinite", color: "#1DB954", flexShrink: 0 }}>♪</span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {currentTrack}
-                </span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentTrack}</span>
               </div>
             </div>
-
             <div style={{
               background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
               borderRadius: 14, padding: "6px 4px",
@@ -788,9 +804,7 @@ export default function App() {
                   <span style={{
                     fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                     color: "rgba(255,255,255,0.2)", width: 20, textAlign: "right", flexShrink: 0,
-                  }}>
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
+                  }}>{String(i + 1).padStart(2, "0")}</span>
                   <div style={{
                     width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
                     background: r.found ? "#1DB954" : "rgba(231,76,60,0.6)",
@@ -800,15 +814,11 @@ export default function App() {
                       fontSize: 14, fontWeight: 500,
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                       color: r.found ? "#eee" : "rgba(255,255,255,0.35)",
-                    }}>
-                      {r.found ? (r.spotifyTrack?.name || r.song.title) : r.song.title}
-                    </div>
+                    }}>{r.found ? (r.spotifyTrack?.name || r.song.title) : r.song.title}</div>
                     <div style={{
                       fontSize: 12, color: "rgba(255,255,255,0.3)",
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    }}>
-                      {r.found ? (r.spotifyTrack?.artists?.[0]?.name || r.song.artist) : `${r.song.artist} — 見つかりません`}
-                    </div>
+                    }}>{r.found ? (r.spotifyTrack?.artists?.[0]?.name || r.song.artist) : `${r.song.artist} — 見つかりません`}</div>
                   </div>
                 </div>
               ))}
@@ -825,32 +835,25 @@ export default function App() {
                 width: 56, height: 56, borderRadius: "50%",
                 background: "#1DB954", boxShadow: "0 6px 24px rgba(29,185,84,0.3)",
                 animation: "bounceCheck 0.5s ease-out",
-              }}>
-                <CheckIcon size={26} />
-              </div>
+              }}><CheckIcon size={26} /></div>
             </div>
 
             <div style={{
               background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
               borderRadius: 16, overflow: "hidden",
             }}>
-              <div style={{
-                padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)",
-              }}>
+              <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                 <div style={{ fontSize: 16, fontWeight: 600 }}>{playlistTitle}</div>
                 <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", marginTop: 2 }}>
                   {foundCount}/{results.length}曲{isDemo ? "（デモ）" : ""}
                 </div>
               </div>
-
               <div style={{ padding: "4px" }}>
                 {results.map((r, i) => (
-                  <a key={i}
-                    className="done-song-link"
+                  <a key={i} className="done-song-link"
                     href={r.found ? (r.spotifyTrack?.external_urls?.spotify || "#") : "#"}
                     target="_blank" rel="noopener noreferrer"
-                    style={{ animationDelay: `${i * 0.04}s`, opacity: r.found ? 1 : 0.35 }}
-                  >
+                    style={{ animationDelay: `${i * 0.04}s`, opacity: r.found ? 1 : 0.35 }}>
                     <div style={{
                       width: 36, height: 36, borderRadius: 8, flexShrink: 0,
                       background: r.found && r.spotifyTrack?.album?.images?.[0]?.url
@@ -863,27 +866,19 @@ export default function App() {
                       )}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{
-                        fontSize: 14, fontWeight: 500,
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {r.found ? (r.spotifyTrack?.name || r.song.title) : r.song.title}
                       </div>
                       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>
                         {r.found ? (r.spotifyTrack?.artists?.[0]?.name || r.song.artist) : "見つかりません"}
                       </div>
                     </div>
-                    {r.found && (
-                      <span style={{ fontSize: 11, color: "#1DB954", flexShrink: 0 }}>
-                        <ExternalLink size={14} />
-                      </span>
-                    )}
+                    {r.found && <span style={{ fontSize: 11, color: "#1DB954", flexShrink: 0 }}><ExternalLink size={14} /></span>}
                   </a>
                 ))}
               </div>
             </div>
 
-            {/* Main CTA */}
             <div style={{ marginTop: 20 }}>
               {createdPlaylistUrl ? (
                 <a href={createdPlaylistUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
@@ -898,11 +893,8 @@ export default function App() {
               )}
             </div>
 
-            {/* Secondary actions */}
             <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={handleReset}>
-                別のリスト
-              </button>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={handleReset}>別のリスト</button>
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={handleCopyList}>
                 {copied ? <><CheckIcon size={14} /> コピー済み</> : <><CopyIcon /> リストをコピー</>}
               </button>
@@ -921,10 +913,11 @@ export default function App() {
           </div>
         )}
 
-        {/* Footer */}
+        {/* ═══════ PROMPT SECTION ═══════ */}
+        <PromptSection />
+
         <div style={{
-          marginTop: 40, textAlign: "center",
-          fontSize: 11, color: "rgba(255,255,255,0.12)",
+          marginTop: 24, textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.12)",
           paddingBottom: "env(safe-area-inset-bottom, 0px)",
         }}>
           Spotify は Spotify AB の商標です
