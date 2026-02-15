@@ -429,13 +429,13 @@ export default function App() {
         setError("曲が見つかりませんでした。曲名を確認してください。");
         setPhase("preview"); return;
       }
-      const playlist = await spotifyPost(`/users/${user.id}/playlists`, token, {
+      const playlist = await spotifyPost(`/me/playlists`, token, {
         name: playlistTitle || "My Playlist",
         description: "Created with Playlist Creator",
         public: false,
       });
       setCurrentTrack("曲を追加中..."); setProgress(95);
-      await spotifyPost(`/playlists/${playlist.id}/tracks`, token, { uris: trackUris });
+      await spotifyPost(`/playlists/${playlist.id}/items`, token, { uris: trackUris });
       setCreatedPlaylistUrl(playlist.external_urls.spotify);
       setProgress(100); setPhase("done");
     } catch (err) {
