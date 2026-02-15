@@ -10,7 +10,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 
 const SPOTIFY_CLIENT_ID = "0bd908bfd00242e880c81e6dcb34cabc";
 const REDIRECT_URI = window.location.origin + window.location.pathname;
-const SCOPES = "playlist-modify-public playlist-modify-private";
+const SCOPES = "playlist-modify-public playlist-modify-private user-read-private user-read-email";
 
 // ── PKCE Auth Helpers ──
 
@@ -133,7 +133,10 @@ async function spotifyGet(endpoint, token) {
   const res = await fetch(`https://api.spotify.com/v1${endpoint}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) throw new Error(`Spotify API error: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Spotify API error: ${res.status} ${body}`);
+  }
   return res.json();
 }
 
@@ -143,7 +146,10 @@ async function spotifyPost(endpoint, token, body) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Spotify API error: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`Spotify API error: ${res.status} ${errBody}`);
+  }
   return res.json();
 }
 
@@ -742,7 +748,8 @@ export default function App() {
               <div style={{
                 padding: 14, marginBottom: 16, borderRadius: 12,
                 background: "rgba(231,76,60,0.1)", border: "1px solid rgba(231,76,60,0.2)",
-                color: "#e74c3c", fontSize: 14,
+                color: "#e74c3c", fontSize: 13, maxHeight: 120, overflowY: "auto",
+                wordBreak: "break-all",
               }}>{error}</div>
             )}
             <div style={{
