@@ -33,7 +33,34 @@ function base64urlEncode(buffer) {
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function startAuth() {
+function saveStateBeforeAuth(rawText, playlistTitle, songs, phase) {
+  try {
+    sessionStorage.setItem("pl_rawText", rawText);
+    sessionStorage.setItem("pl_title", playlistTitle);
+    sessionStorage.setItem("pl_songs", JSON.stringify(songs));
+    sessionStorage.setItem("pl_phase", phase);
+  } catch {}
+}
+
+function restoreStateAfterAuth() {
+  try {
+    const rawText = sessionStorage.getItem("pl_rawText") || "";
+    const title = sessionStorage.getItem("pl_title") || "";
+    const songs = JSON.parse(sessionStorage.getItem("pl_songs") || "[]");
+    const phase = sessionStorage.getItem("pl_phase") || "paste";
+    sessionStorage.removeItem("pl_rawText");
+    sessionStorage.removeItem("pl_title");
+    sessionStorage.removeItem("pl_songs");
+    sessionStorage.removeItem("pl_phase");
+    return { rawText, title, songs, phase };
+  } catch {
+    return { rawText: "", title: "", songs: [], phase: "paste" };
+  }
+}
+
+async function startAuth(rawText = "", playlistTitle = "", songs = [], phase = "paste") {
+  saveStateBeforeAuth(rawText, playlistTitle, songs, phase);
+
   const codeVerifier = generateRandomString(64);
   const hashed = await sha256(codeVerifier);
   const codeChallenge = base64urlEncode(hashed);
@@ -308,6 +335,16 @@ export default function App() {
     if (code) {
       setAuthLoading(true);
       window.history.replaceState(null, "", window.location.pathname);
+
+      // Restore saved state
+      const saved = restoreStateAfterAuth();
+      if (saved.rawText) setRawText(saved.rawText);
+      if (saved.title) setPlaylistTitle(saved.title);
+      if (saved.songs.length > 0) {
+        setSongs(saved.songs);
+        if (saved.phase === "preview" || saved.phase === "done") setPhase("preview");
+      }
+
       exchangeCodeForToken(code)
         .then((accessToken) => {
           setToken(accessToken);
@@ -356,7 +393,7 @@ export default function App() {
     setCurrentTrack(""); setResults([]); setCreatedPlaylistUrl(""); setError("");
     setCopied(false);
   };
-  const handleLogin = () => startAuth();
+  const handleLogin = () => startAuth(rawText, playlistTitle, songs, phase);
   const handleLogout = () => { setToken(null); setUser(null); };
   const handleCopyList = () => {
     const text = `${playlistTitle}\n${songs.map((s, i) => `${i + 1}. ${s.title} / ${s.artist}`).join("\n")}`;
